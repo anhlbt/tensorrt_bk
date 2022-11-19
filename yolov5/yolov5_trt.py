@@ -13,6 +13,7 @@ import numpy as np
 import pycuda.autoinit
 import pycuda.driver as cuda
 import tensorrt as trt
+from pathlib import Path
 
 CONF_THRESH = 0.5
 IOU_THRESHOLD = 0.4
@@ -179,6 +180,58 @@ class YoLov5TRT(object):
                     ),
                 )
         return batch_image_raw, end - start
+
+    def infer2(self, input_image_path):
+        # Make self the active context, pushing it on top of the context stack.
+        # self.cfx.push()
+        self.ctx.push()
+        # Restore
+        stream = self.stream
+        context = self.context
+        engine = self.engine
+        host_inputs = self.host_inputs
+        cuda_inputs = self.cuda_inputs
+        host_outputs = self.host_outputs
+        cuda_outputs = self.cuda_outputs
+        bindings = self.bindings
+        # Do image preprocess
+        input_image, image_raw, origin_h, origin_w = self.preprocess_image(
+            input_image_path
+        )  # Copy input image to host buffer
+        time_start = time.time()
+        np.copyto(host_inputs[0], input_image.ravel())
+        # Transfer input data  to the GPU.
+        cuda.memcpy_htod_async(cuda_inputs[0], host_inputs[0], stream)
+        # Run inference.
+        context.execute_async(bindings=bindings, stream_handle=stream.handle)
+        # Transfer predictions back from the GPU.
+        cuda.memcpy_dtoh_async(host_outputs[0], cuda_outputs[0], stream)
+        # Synchronize the stream
+        stream.synchronize()
+        # Remove any context from the top of the context stack, deactivating it.
+        self.ctx.pop()
+        # Here we use the first row of output in that batch_size = 1
+        output = host_outputs[0]
+        time_end = time.time()
+        print("time: ", time_end - time_start)
+        # Do postprocess
+        try:
+            result_boxes, result_scores, result_classid = self.post_process(output, origin_h, origin_w)
+            for j in range(len(result_boxes)):
+                box = result_boxes[j]
+                plot_one_box(
+                    box,
+                    image_raw,
+                    label="{}:{:.2f}".format(
+                        categories[int(result_classid[j])], result_scores[j]
+                    ),
+                )  
+                print(categories[int(result_classid[j])], result_scores[j])
+        except Exception as ex:
+            print(ex)              
+        # cv2.imwrite("test.png", image_raw)
+        
+        return result_boxes, result_scores, result_classid, image_raw
 
     def destroy(self):
         # Remove any context from the top of the context stack, deactivating it.
@@ -402,8 +455,8 @@ class warmUpThread(threading.Thread):
 
 if __name__ == "__main__":
     # load custom plugin and engine
-    PLUGIN_LIBRARY = "build/libmyplugins.so"
-    engine_file_path = "build/yolov5s.engine"
+    PLUGIN_LIBRARY = "./yolov5/build/libmyplugins.so"
+    engine_file_path = "./yolov5/build/face_v6_best.engine"
 
     if len(sys.argv) > 1:
         engine_file_path = sys.argv[1]
@@ -414,37 +467,60 @@ if __name__ == "__main__":
 
     # load coco labels
 
-    categories = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-            "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-            "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-            "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-            "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-            "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-            "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
-            "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-            "hair drier", "toothbrush"]
-
+    # categories = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    #         "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    #         "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    #         "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+    #         "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    #         "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+    #         "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+    #         "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    #         "hair drier", "toothbrush"]
+    categories = ['face', 'face_mask']
+    
     if os.path.exists('output/'):
         shutil.rmtree('output/')
     os.makedirs('output/')
     # a YoLov5TRT instance
     yolov5_wrapper = YoLov5TRT(engine_file_path)
     try:
-        print('batch size is', yolov5_wrapper.batch_size)
+        # #inference with batch mode
+        # print('batch size is', yolov5_wrapper.batch_size)
         
-        image_dir = "samples/"
-        image_path_batches = get_img_path_batches(yolov5_wrapper.batch_size, image_dir)
+        # image_dir = "samples/"
+        # image_path_batches = get_img_path_batches(yolov5_wrapper.batch_size, image_dir)
 
-        for i in range(10):
-            # create a new thread to do warm_up
-            thread1 = warmUpThread(yolov5_wrapper)
-            thread1.start()
-            thread1.join()
-        for batch in image_path_batches:
-            # create a new thread to do inference
-            thread1 = inferThread(yolov5_wrapper, batch)
-            thread1.start()
-            thread1.join()
+        # for i in range(10):
+        #     # create a new thread to do warm_up
+        #     thread1 = warmUpThread(yolov5_wrapper)
+        #     thread1.start()
+        #     thread1.join()
+        # for batch in image_path_batches:
+        #     # create a new thread to do inference
+        #     thread1 = inferThread(yolov5_wrapper, batch)
+        #     thread1.start()
+        #     thread1.join()
+
+        cap = cv2.VideoCapture(0)
+        while (True):
+
+            # Capture frame from webcam
+            start = time.time()
+            ret, frame = cap.read()
+            if frame is None:
+                print("Error, check if camera is connected!")
+                break 
+
+            img_height, img_width, img_ch = frame.shape
+            result_boxes, result_scores, result_classid, image  = yolov5_wrapper.infer2(frame)
+            print("time per frame: ", time.time() - start)
+            print("object: ",len(result_classid))
+            cv2.imshow("test", image)
+            cv2.waitKey(1)
+
+
+    except Exception as ex:
+        print(ex)
     finally:
         # destroy the instance
         yolov5_wrapper.destroy()
